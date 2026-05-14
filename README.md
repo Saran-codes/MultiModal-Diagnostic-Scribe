@@ -2,66 +2,103 @@
 
 > Research project in computational cytopathology.
 
-An end-to-end two-stage deep learning system that takes a raw Pap smear image and outputs a structured, clinically interpretable Bethesda System report in JSON. The system moves beyond categorical classification by combining a high-resolution vision classifier with a causal Vision-Language Model (VLM), giving a diagnosis a clinical voice.
+An end-to-end system that takes a raw Pap smear image and writes a structured, clinically interpretable Bethesda System report in JSON. The name reflects what the system does: it reads cytology slides and produces the written diagnostic record a pathologist would author — the scribe for the microscope.
+
+The core technical challenge is that no public dataset pairs cervical cytology images with structured diagnostic reports. This project builds that dataset from scratch using a purpose-built synthetic report pipeline, then trains a Vision-Language Model on it.
 
 ---
 
-## The Problem
+## What the Scribe Produces
 
-Automated cytology classifiers produce a single integer. A class label gives a clinician no morphological reasoning and no actionable clinical language. Compounding this, no public dataset pairs cervical cytology images with structured diagnostic reports, which has blocked serious work on explainable text generation for this domain.
+Given a Pap smear image, the system outputs:
 
-This project addresses both problems directly: it builds the multimodal architecture and generates the training data from scratch.
+```json
+{
+  "specimen_type": "Conventional Pap smear",
+  "specimen_adequacy": "Satisfactory for evaluation",
+  "general_categorization": "Epithelial cell abnormality",
+  "microscopic_description": "Intermediate squamous cells with enlarged hyperchromatic nuclei, irregular nuclear membranes, and increased nuclear-to-cytoplasmic ratio. Koilocytic changes noted.",
+  "interpretation": "High-grade squamous intraepithelial lesion (HSIL)",
+  "recommendation": "Colposcopy with directed biopsy recommended."
+}
+```
+
+Every field maps to a Bethesda System reporting category. The output is not a class label — it is actionable clinical language grounded in what the model sees.
 
 ---
 
 ## System Architecture
 
 ```
-                        ┌─────────────────────────────────────┐
-                        │           Input Image               │
-                        │         (1024 × 1024)               │
-                        └──────────────┬──────────────────────┘
-                                       │
-                   ┌───────────────────┴───────────────────┐
-                   │                                       │
-                   ▼                                       ▼
-     ┌─────────────────────────┐           ┌──────────────────────────┐
-     │   Stage 1: Classifier   │           │  Stage 2: Vision Encoder │
-     │  ConvNeXt-Tiny / ResNet │           │  ResNet-50 (stripped)    │
-     └───────────┬─────────────┘           └──────────────┬───────────┘
-                 │                                        │
-                 ▼                                        ▼
-     ┌───────────────────────┐           ┌──────────────────────────────┐
-     │   Classification Head │           │  Adaptive Avg Pool → 16×16   │
-     │   (5-class Bethesda)  │           │  256 Visual Tokens           │
-     └───────────┬───────────┘           └──────────────┬───────────────┘
-                 │                                       │
-                 ▼                                       ▼
-     ┌───────────────────────┐           ┌──────────────────────────────┐
-     │   Predicted Label     │           │  Cross-Modal MLP Bridge      │
-     │  NILM / LSIL / HSIL  ├──────────▶│  2048 → 1024 (GELU)          │
-     │    ADENO / SCC        │  prompt   │  Visual Scaling (1.2×)       │
-     └───────────────────────┘ inject   └──────────────┬───────────────┘
-                                                        │
-                                                        ▼
-                                        ┌──────────────────────────────┐
-                                        │   BioGPT Language Decoder    │
-                                        │   (350M params, 1024 ctx)    │
-                                        └──────────────┬───────────────┘
-                                                        │
-                                                        ▼
-                                        ┌──────────────────────────────┐
-                                        │      Bethesda JSON Report    │
-                                        │  specimen_type               │
-                                        │  specimen_adequacy           │
-                                        │  general_categorization      │
-                                        │  microscopic_description     │
-                                        │  interpretation              │
-                                        │  recommendation              │
-                                        └──────────────────────────────┘
+                     ┌─────────────────────────┐
+                     │       Input Image        │
+                     │      (1024 × 1024)       │
+                     └────────────┬─────────────┘
+                                  │
+                ┌─────────────────┴─────────────────┐
+                │                                   │
+                ▼                                   ▼
+     ┌──────────────────────┐         ┌────────────────────────────┐
+     │  Stage 1             │         │  Stage 2                   │
+     │  Classifier          │         │  Vision Encoder            │
+     │  ConvNeXt-Tiny       │         │  ResNet-50 (stripped)      │
+     └──────────┬───────────┘         └─────────────┬──────────────┘
+                │                                   │
+                ▼                                   ▼
+     ┌──────────────────────┐         ┌────────────────────────────┐
+     │  Predicted Label     │         │  Adaptive Avg Pool         │
+     │  NILM / LSIL / HSIL  ├────────▶│  16×16 → 256 Visual Tokens │
+     │  ADENO / SCC         │  prompt │  MLP Bridge 2048→1024      │
+     └──────────────────────┘  inject └─────────────┬──────────────┘
+                                                     │
+                                                     ▼
+                                      ┌────────────────────────────┐
+                                      │  BioGPT Decoder            │
+                                      │  350M params               │
+                                      │  1024 token context        │
+                                      └─────────────┬──────────────┘
+                                                     │
+                                                     ▼
+                                      ┌────────────────────────────┐
+                                      │  Bethesda Report (JSON)    │
+                                      │  specimen_type             │
+                                      │  specimen_adequacy         │
+                                      │  general_categorization    │
+                                      │  microscopic_description   │
+                                      │  interpretation            │
+                                      │  recommendation            │
+                                      └────────────────────────────┘
 ```
 
-The Stage 1 predicted label is injected directly into the Stage 2 text prompt before generation. This grounds the language model in the classifier's output and eliminates clinical hallucinations.
+The Stage 1 predicted label is injected as natural language into the Stage 2 prompt before generation, grounding the language model in the classifier's output and eliminating clinical hallucination.
+
+---
+
+## Synthetic Report Pipeline
+
+The defining challenge of this project: **no public dataset pairs cytology images with structured Bethesda reports.** Without training data, there is no scribe. The pipeline builds that data from scratch.
+
+### How It Works
+
+1. For each image, the ground-truth diagnostic label (NILM, LSIL, HSIL, ADENO, or SCC) is extracted from the dataset registry.
+2. Two independent Bethesda-format JSON reports are generated per image using the Gemini 3 API, anchored by the ground-truth label to prevent hallucination.
+3. A multi-worker orchestration layer (`manager.py`) runs parallel API workers with automatic sync and graceful stop, processing images at scale.
+4. A diagnostic card generator (`bounding_box.py`) overlays cell bounding boxes and the microscopic description onto the source image — making each report visually traceable to the morphology it describes.
+
+### Expert Validation
+
+The generated reports were independently reviewed by a cytopathologist at AIIMS Deogarh:
+
+| Bethesda Category | Expert Score (/ 5.0) |
+|-------------------|----------------------|
+| NILM              | 3.0                  |
+| LSIL              | 3.1                  |
+| HSIL              | 3.5                  |
+| ADENO             | 3.0                  |
+| SCC               | 3.2                  |
+| **Mean**          | **3.16**             |
+
+High-severity categories (HSIL, SCC) scored highest, which matters most clinically. The pipeline produced **over 9,000 report pairs** — the training corpus for Stage 2.
 
 ---
 
@@ -94,17 +131,15 @@ MultiModal-Diagnostic-Scribe/
 
 ---
 
-## Key Design Decisions
+## Key Technical Decisions
 
-**Passive Scaling** — Images from disparate sources (whole-slide vs. single-cell crops) vary enormously in dimension. Rather than stretching everything to 224×224 (which destroys the nuclear-to-cytoplasmic ratio), each image is scaled to fit within a 1024×1024 black canvas while preserving its aspect ratio. The N/C ratio is the primary morphological indicator of dysplasia; distorting it is clinically invalid.
+**Passive Scaling** — Images from disparate sources (whole-slide vs. single-cell crops) vary enormously in dimension. Rather than stretching to 224×224, each image is placed on a 1024×1024 black canvas at its native aspect ratio. The nuclear-to-cytoplasmic (N/C) ratio is the primary morphological indicator of dysplasia; distorting it is clinically invalid.
 
-**Class-Weighted Focal Loss** — The dataset is heavily imbalanced: benign NILM samples far outnumber rare malignant classes like SCC. Standard cross-entropy collapses to a majority-class predictor. Focal Loss with inverse-frequency class weights forces the optimizer to keep paying attention to hard, rare cases.
+**Class-Weighted Focal Loss** — The dataset is heavily imbalanced: benign NILM samples far outnumber rare malignant classes like SCC. Standard cross-entropy collapses to a majority-class predictor. Focal Loss (γ=2.0) with inverse-frequency class weights forces the optimizer to keep attending to hard, rare cases.
 
-**Label Conditioning with 50% Masking** — The Stage 1 label is injected as a natural language prompt into BioGPT. To prevent posterior collapse (the model ignoring the image and just parroting the prompt), 50% of training samples replace the guided prompt with a generic instruction, forcing the model to derive the pathology from the 256 visual tokens.
+**Label Conditioning with 50% Masking** — The Stage 1 label is injected as a natural language prompt into BioGPT. To prevent posterior collapse (the model ignoring the image and parroting the prompt), 50% of training samples replace the guided prompt with a generic instruction, forcing the model to derive pathology from the 256 visual tokens.
 
-**Synthetic Ground Truth Pipeline** — No public dataset pairs cytology images with structured reports. The Gemini 3 API was used to generate two independent Bethesda-format JSON reports per image, anchored by the ground-truth diagnostic label to prevent hallucination. The pipeline produced over 9,000 report pairs, independently reviewed by a cytopathologist at AIIMS Deogarh (mean expert score: 3.16/5.0, with high-severity categories HSIL and SCC scoring 3.5 and 3.2 respectively).
-
-**5-Phase Incremental Training** — Training a randomly initialized MLP bridge alongside frozen pre-trained vision and language models would corrupt BioGPT's biomedical weights with large early gradients. The training cascade progressively unfreezes: MLP only → deeper MLP → higher visual resolution → top BioGPT layers → full end-to-end with ResNet layer4.
+**5-Phase Incremental Training** — Training a randomly initialized MLP bridge alongside frozen pre-trained models would corrupt BioGPT's biomedical weights with large early gradients. The cascade progressively unfreezes: MLP only → deeper MLP → higher visual resolution → top BioGPT layers → full end-to-end with ResNet layer4.
 
 ---
 
@@ -119,7 +154,7 @@ MultiModal-Diagnostic-Scribe/
 | Macro F1-Score    | 88.16%    | **89.72%**    |
 | SCC Recall        | 0.78      | **0.91**      |
 
-The SCC recall improvement (+13%) is the critical number. Missing a Squamous Cell Carcinoma is not a statistical error; it is a catastrophic clinical failure.
+The SCC recall improvement (+13%) is the critical number. Missing a Squamous Cell Carcinoma is not a statistical error — it is a catastrophic clinical failure.
 
 ### Stage 2 — Report Generation (Test Set)
 
@@ -127,9 +162,8 @@ The SCC recall improvement (+13%) is the critical number. Missing a Squamous Cel
 |---------|--------|
 | BLEU-4  | 50.44  |
 | ROUGE-L | 28.00  |
-| METEOR  | —      |
 
-Attention forensics confirmed the model is visually grounded: when generating terms like *hyperchromatic nuclei*, cross-attention weights concentrate on the actual abnormal cells in the 1024×1024 image, not background debris.
+Attention forensics confirmed the model is visually grounded: when generating terms like *hyperchromatic nuclei*, cross-attention weights concentrate on the actual abnormal cells in the image, not background debris.
 
 ---
 
@@ -153,7 +187,7 @@ google-genai          # Synthetic report pipeline
 wandb                 # Training monitoring
 evaluate              # ROUGE, BLEU, METEOR
 nltk
-pycocoevalcap         # CIDEr (optional)
+pycocoevalcap         # CIDEr
 pandas
 Pillow
 tqdm
