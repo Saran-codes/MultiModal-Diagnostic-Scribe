@@ -4,7 +4,7 @@
 
 An end-to-end system that takes a raw Pap smear image and writes a structured, clinically interpretable Bethesda System report in JSON. The name reflects what the system does: it reads cytology slides and produces the written diagnostic record a pathologist would author — the scribe for the microscope.
 
-The core technical challenge is that no public dataset pairs cervical cytology images with structured diagnostic reports. This project builds that dataset from scratch using a purpose-built synthetic report pipeline, then trains a Vision-Language Model on it.
+The core technical challenge is that no public dataset pairs cervical cytology images with structured diagnostic reports. This project builds that dataset from scratch using a purpose-built synthetic report pipeline, then trains a custom Vision-Language Model on it.
 
 ---
 
